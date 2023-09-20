@@ -1,0 +1,306 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.graalvm.buildtools.native' version '0.9.25'
+    id 'com.google.osdetector' version '1.7.3'
+}
+
+tasks.wrapper {
+    gradleVersion = '8.3'
+    distributionType = Wrapper.DistributionType.ALL
+}
+
+group 'com.mygame'
+version '1.0'
+
+mainClassName = "com.mygame.Main"
+String dependenciesString = ""
+
+//returns the <os>-<arch> platform string suitable for retrieval of LWJGL natives
+//(if <arch> is blank, it implies "x86_64")
+def getCurrentPlatform() {
+    def os = osdetector.os
+    def lwjglOS = os == 'linux' ? 'linux' :
+                  os == 'osx' ? 'macos' :
+                  os == 'windows' ? 'windows' :
+                  'unknown'
+    if (lwjglOS == 'unknown')
+        throw new GradleException('Unsupported OS: ' + os)
+
+    def arch = osdetector.arch
+    //consider 64-bit architectures only
+    def lwjglArch = arch == 'x86_64' ? '' :
+                    arch == 'aarch_64' ? 'arm64' :
+                    'unknown'
+    if (lwjglArch == 'unknown')
+        throw new GradleException('Unsupported Architecture: ' + arch)
+
+    return (lwjglArch == '' ? lwjglOS : (lwjglOS + '-' + lwjglArch))
+}
+
+ext {
+    lwjglVersion = '3.3.3-SNAPSHOT'
+    //lwjglVersion = '3.3.2'
+
+    //LWJGL modules used: minimal OpenGL
+    //lwjglModules = ['lwjgl', 'lwjgl-assimp', 'lwjgl-glfw', 'lwjgl-openal', 'lwjgl-opengl', 'lwjgl-stb']
+    lwjglModules = ['lwjgl', 'lwjgl-glfw', 'lwjgl-openal', 'lwjgl-opengl', 'lwjgl-jemalloc']
+
+    mainClassName = 'com.mygame.Main'
+    currentPlatform = getCurrentPlatform()
+    nativeImageDirName = "native-image-$currentPlatform"
+    graalDir = rootProject.file("graalconfig/run0")
+}
+
+repositories {
+    mavenCentral()
+    jcenter()
+    maven { url 'https://jitpack.io' }
+    maven {
+        url "https://oss.sonatype.org/content/repositories/snapshots"
+    }
+}
+
+project.ext {
+  jmeVer = '3.6.1-stable'
+}
+
+project(":assets") {
+    apply plugin: "java"
+
+    buildDir = rootProject.file("build/assets")
+
+    sourceSets {
+        main {
+            resources {
+                srcDir '.'
+            }
+        }
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(11)
+        }
+    }
+}
+
+dependencies {
+  //get recommended dependency versions from the LWJGL BOM
+  implementation platform("org.lwjgl:lwjgl-bom:$lwjglVersion")
+
+  //add LWJGL modules and the current OS's natives to the compile and runtime classpaths
+  lwjglModules.each {
+    implementation "org.lwjgl:$it"
+    if (it != 'lwjgl-egl')  //lwjgl-egl has no native libraries
+      runtimeOnly "org.lwjgl:$it::natives-$currentPlatform"
+  }
+
+  // Core JME
+  implementation "org.jmonkeyengine:jme3-core:$jmeVer"
+  implementation "org.jmonkeyengine:jme3-desktop:$jmeVer"
+  implementation "org.jmonkeyengine:jme3-awt-dialogs:$jmeVer"
+  implementation "org.jmonkeyengine:jme3-lwjgl3:$jmeVer"
+
+  // Suppress errors / warnings building in SDK
+  implementation "org.jmonkeyengine:jme3-jogg:$jmeVer"
+  implementation "org.jmonkeyengine:jme3-plugins:$jmeVer"
+
+  // Additional Libraries
+
+  // Assets sub-project
+  runtimeOnly project(':assets')
+}
+
+application {
+    mainClass = project.mainClassName
+    applicationName = project.name  //name of the resulting native executable
+}
+
+compileJava {
+    options.release = 11  //use JDK11+ for compiling & running
+    options.encoding = 'UTF-8'
+}
+
+run {
+    //get system properties specified from the command line (for debugging, etc.)
+    //and pass them on to the running application's JVM
+    systemProperties = System.getProperties()
+
+    //use the following jvmArgs for as many different run scenarios as possible,
+    //and for all the code-execution paths as much as possible,
+    //to generate (or merge with) the GraalVM native-image configuration files
+    //in the src/main/resources/META-INF/native-image directory.
+    //This directory is read by GraalVM during the native-image build.
+
+    //jvmArgs = ["-agentlib:native-image-agent=config-merge-dir=src/main/resources/META-INF/native-image"]
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': "$mainClassName"
+    }
+}
+
+/*
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)
+    }
+}
+*/
+
+wrapper {
+    gradleVersion = '8.3'
+}
+
+task copyJars(type: Copy) {
+    from (sourceSets.main.runtimeClasspath){
+        include '**/*.jar'
+    }
+    from(sourceSets.main.compileClasspath){
+        include '**/*.jar'
+    }
+    into('build/libs/dependencies')
+    includeEmptyDirs = false
+    setDuplicatesStrategy(DuplicatesStrategy.EXCLUDE)
+}
+
+/**
+ * Better approach described below, but the 2 of them are vial ones
+ */
+task createJar(type : Jar, dependsOn : copyJars){
+    //get the copied jars
+    final String project = rootDir.getPath()
+    final File dependencies = new File(project + "/build/libs/dependencies/")
+    if(dependencies.exists()) {
+        if (dependencies.listFiles().length > 0) {
+            final File[] files = dependencies.listFiles()
+            for (int i = 0; i < files.length; i++) {
+                final String fileName = files[i].getName()
+                if (fileName.contains(".jar")) {
+                    dependenciesString += "dependencies/" + fileName + " "
+                }
+            }
+        }
+    }
+    manifest{
+        attributes('Main-Class': mainClassName)
+        //pass the jars to the manifest
+        attributes('Class-Path' : dependenciesString)
+        attributes('Created-By' : 'Jme3-Gradle')
+    }
+    with jar
+}
+/**
+ * A Suggestion of better code by : Mikhail Bobrutskov (aka wizzardo)
+ */
+task releaseJar(type: Jar, dependsOn: copyJars) {
+    manifest {
+        attributes("Main-Class": mainClassName,
+                "Class-Path": sourceSets.main.runtimeClasspath.filter {it.isFile() }.collect { "dependencies/${it.name}" }.join(' '))
+    }
+    //tag the jar task to inject this task into it
+    with jar
+}
+
+task extractLwjglManifest(type: Copy) {
+    from {
+        configurations.compileClasspath.filter { it.name == "lwjgl-${lwjglVersion}.jar" }
+                                       .collect { zipTree(it) }
+    }
+    include 'META-INF/MANIFEST.MF'
+    into "$buildDir/tmp"
+}
+
+//create a stand-alone executable uber jar
+//including all dependencies for current platform
+task uberJar(type: Jar) {
+    dependsOn extractLwjglManifest
+    archiveClassifier = "no-deps-$currentPlatform"
+
+    with jar
+    manifest {
+        from (extractLwjglManifest.destinationDir.path + '/META-INF/MANIFEST.MF') {
+            eachEntry { details ->
+                if (details.key == 'Created-By')
+                    details.value = System.getProperty('java.runtime.version') + ' (' + System.getProperty('java.vendor') + ')'
+                else if (details.key == 'Ant-Version')
+                    details.exclude()
+            }
+        }
+        attributes(
+            'Main-Class': project.mainClassName,
+            'Built-By': System.getProperty('user.name'),
+            'Gradle-Version': 'Gradle ' + gradle.getGradleVersion(),
+        )
+    }
+
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    exclude 'META-INF/*.RSA', 'META-INF/*.SF', 'META-INF/*.DSA'
+    duplicatesStrategy 'exclude'
+}
+
+//remove unneeded .dll/.txt files
+task removeUnneededDllFiles {
+    doLast {
+        if (file("$buildDir/$nativeImageDirName").exists()) {
+            ant.move(todir: "$buildDir/tmp/$nativeImageDirName") {
+                fileset(dir: "$buildDir/$nativeImageDirName") {
+                    include name: '*.dll'
+                    include name: '*.pdb'
+                    include name: '*.txt'
+                }
+            }
+        }
+        if (file("$buildDir/$nativeImageDirName/reports").exists()) {
+            ant.move(file: "$buildDir/$nativeImageDirName/reports",
+                     tofile: "$buildDir/tmp/$nativeImageDirName/reports")
+        }
+        if (file("$buildDir/$nativeImageDirName/sources").exists()) {
+            ant.move(file: "$buildDir/$nativeImageDirName/sources",
+                     tofile: "$buildDir/tmp/$nativeImageDirName/sources")
+        }
+    }
+}
+
+graalvmNative {
+    toolchainDetection = false
+    binaries {
+        main {
+            imageName = project.name
+            mainClass = project.mainClassName
+            debug = true
+            verbose = true
+            fallback = false
+
+            buildArgs.add('--initialize-at-run-time=org.lwjgl')
+            buildArgs.add('--native-image-info')
+            //buildArgs.add('-march=native') //only available in GraalVM for JDK 17+
+            buildArgs.add("-H:Path=$buildDir/$nativeImageDirName")
+            buildArgs.add("-H:TempDirectory=$buildDir/tmp/$nativeImageDirName")
+            //buildArgs.add("-H:ConfigurationFileDirectories=$graalDir")
+            configurationFileDirectories.from(file("$graalDir"))
+            buildArgs.add("--enable-http")
+            buildArgs.add("--enable-https")
+            buildArgs.add("-Djava.awt.headless=false")
+            //buildArgs.add('-H:+TraceNativeToolUsage')
+
+            useFatJar = false
+        }
+    }
+    metadataRepository {
+        enabled = false
+    }
+}
+
+tasks.named("nativeCompile") {
+    //use the uber jar if long classpath becomes a problem in Windows:
+    //dependsOn uberJar
+    //classpathJar = uberJar.archiveFile
+    finalizedBy removeUnneededDllFiles
+}
+
+

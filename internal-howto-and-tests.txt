@@ -1,0 +1,62 @@
+** NOTE: this build uses lwjgl 3.3.3-snapshot instead of 3.3.2 which is the default in jme3.6.1 because this release fails with graalvm
+
+Based in the lwjgl example at https://github.com/chirontt/lwjgl3-helloworld-native
+Also mixed gradle stuff from both jme3-sdk new project and jme3 website project initializer
+
+Buiding:
+
+From project folder:
+#export JAVA_HOME=<Where you installed graalvm ce for java11>
+export JAVA_HOME=~/Descargas/graalvm-ce-java11-22.3.2/
+./gradlew clean
+./gradlew releaseJar
+./gradlew nativeCompile
+
+
+OLD INFO WHILE TESTING:
+
+OPTION A:
+From build/libs
+
+$JAVA_HOME/bin/java -agentlib:native-image-agent=config-output-dir=../../graalconfig/run0 -jar GradleGame-1.0.jar
+
+$JAVA_HOME/bin/native-image com.mygame.Main -cp "`find . -name '*.jar' | while read jar; do echo -n "$jar "; done | sed 's/ /:/g'`" --enable-http --enable-https -Djava.awt.headless=false --initialize-at-run-time=org.lwjgl --native-image-info -H:ConfigurationFileDirectories=../../graalconfig/run0 --no-fallback --verbose -H:Name=GradleGame
+
+run the app ./com.mygame.main
+
+OPTION B: Quick and dirty way:
+From project folder:
+    ./gradlew nativeCompile -> Ctrl+C it, we just want to copy the classpath used
+
+From build/libs
+$JAVA_HOME/bin/native-image com.mygame.Main -cp "<Copy here the classpath from nativeCompile>" --enable-http --enable-https -Djava.awt.headless=false --initialize-at-run-time=org.lwjgl --native-image-info -H:ConfigurationFileDirectories=../../graalconfig/run0 --no-fallback --verbose -H:Name=GradleGame
+
+LOGS
+
+Tried getting gradle build native binary by itself but I'm getting the following exception whe running that binary:
+
+sept. 20, 2023 4:31:27 A. M. com.jme3.system.JmeVersion <clinit>
+WARNING: Unable to read version info!
+java.lang.NullPointerException: inStream parameter is null
+        at java.base@11.0.19/java.util.Objects.requireNonNull(Objects.java:246)
+        at java.base@11.0.19/java.util.Properties.load(Properties.java:406)
+        at com.jme3.system.JmeVersion.<clinit>(JmeVersion.java:51)
+        at com.jme3.system.AppSettings.<clinit>(AppSettings.java:280)
+        at com.jme3.app.SimpleApplication.start(SimpleApplication.java:114)
+        at com.mygame.Main.main(Main.java:19)
+
+sept. 20, 2023 4:31:27 A. M. com.jme3.system.JmeSystem checkDelegate
+SEVERE: Failed to find a JmeSystem delegate!
+Ensure either desktop or android jME3 jar is in the classpath.
+Exception in thread "main" java.lang.NullPointerException
+        at com.jme3.system.JmeSystem.showSettingsDialog(JmeSystem.java:227)
+        at com.jme3.app.SimpleApplication.start(SimpleApplication.java:120)
+        at com.mygame.Main.main(Main.java:19)
+
+
+Changed setting to proper set the desired configuration for native and got a different error (AWT not found).
+
+Added headless=false
+
+NOW OK!
+
